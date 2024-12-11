@@ -3,11 +3,13 @@ package bot
 import (
 	"encoding/json"
 	"fmt"
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 // MealResponse структура для ответа от сервиса меню
@@ -37,13 +39,13 @@ type Bot struct {
 
 // ShoppingListItem represents a single item in the shopping list
 type ShoppingListItem struct {
-	ID                    string    `json:"id"`
-	Name                  string    `json:"name"`
-	WeightPerPkg         float64   `json:"weight_per_pkg"`
-	Amount               int       `json:"amount"`
-	PricePerPkg          float64   `json:"price_per_pkg"`
-	ExpirationDate       time.Time `json:"expiration_date"`
-	PresentInFridge      bool      `json:"present_in_fridge"`
+	ID                       string    `json:"id"`
+	Name                     string    `json:"name"`
+	WeightPerPkg             float64   `json:"weight_per_pkg"`
+	Amount                   int       `json:"amount"`
+	PricePerPkg              float64   `json:"price_per_pkg"`
+	ExpirationDate           time.Time `json:"expiration_date"`
+	PresentInFridge          bool      `json:"present_in_fridge"`
 	NutritionalValueRelative struct {
 		Proteins      int `json:"proteins"`
 		Fats          int `json:"fats"`
@@ -60,19 +62,20 @@ type ShoppingListResponse struct {
 func formatShoppingList(jsonStr string) string {
 	var response ShoppingListResponse
 	if err := json.Unmarshal([]byte(jsonStr), &response); err != nil {
+		log.Println(fmt.Errorf("failed to create bot: %w", err))
 		return "❌ Ошибка в формате списка покупок"
 	}
 
 	var result strings.Builder
 	result.WriteString("🛒 *Список покупок:*\n")
-	
+
 	for _, item := range response.Products {
 		// Skip items with empty names, use ID if name is empty
 		itemName := item.Name
 		if itemName == "" {
 			itemName = item.ID
 		}
-		
+
 		result.WriteString(fmt.Sprintf("• %s", itemName))
 		if item.Amount > 0 {
 			result.WriteString(fmt.Sprintf(" (%d шт)", item.Amount))
@@ -95,22 +98,32 @@ func New(token string, menuServiceURL string, knownUsers map[string]string) (*Bo
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bot: %w", err)
 	}
-	
+
 	return &Bot{
 		api:            api,
 		menuServiceURL: menuServiceURL,
 		knownUsers:     knownUsers,
-		}, nil
-	}
-	
-	// Start запускает бот
+	}, nil
+}
+
+// Start запускает бот
 func (b *Bot) Start() error {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
-	
+
 	updates := b.api.GetUpdatesChan(u)
-	
+
+	flag := true
+
 	for update := range updates {
+
+		// Отбивка старта бота
+		if flag {
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "🍖 Бот запущен. Да начнется массонабор!")
+			b.api.Send(msg)
+			flag = false
+		}
+
 		if update.Message == nil && update.CallbackQuery == nil {
 			continue
 		}
@@ -119,13 +132,13 @@ func (b *Bot) Start() error {
 		if update.Message != nil && update.Message.Command() == "start" {
 			userID := fmt.Sprintf("%d", update.Message.From.ID)
 			var welcomeText string
-			
+
 			if userName, isKnown := b.knownUsers[userID]; isKnown {
 				welcomeText = fmt.Sprintf("👋 С возвращением, %s! Нажми кнопку, чтобы получить следующий прием пищи", userName)
 			} else {
 				welcomeText = "⚠️ Извините, но я вас не знаю. Обратитесь к администратору для получения доступа."
 			}
-			
+
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, welcomeText)
 
 			// Добавляем кнопку только для известных пользователей
@@ -144,11 +157,12 @@ func (b *Bot) Start() error {
 
 		// Обработка нажатия кнопки
 		if update.CallbackQuery != nil && update.CallbackQuery.Data == "get_meal" {
-			stubJson := `{"products":[{"id":"Apple","name":"Яблоки","weight_per_pkg":1,"amount":5,"price_per_pkg":150,"expiration_date":"0001-01-01T00:00:00Z","present_in_fridge":false,"nutritional_value_relative":{"proteins":0,"fats":0,"carbohydrates":0,"calories":0}}]}`
-			stubMsg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, formatShoppingList(stubJson))
+			// stubJson := `{"products":[{"id":"Apple","name":"Яблоки","weight_per_pkg":1,"amount":5,"price_per_pkg":150,"expiration_date":"0001-01-01T00:00:00Z","present_in_fridge":false,"nutritional_value_relative":{"proteins":0,"fats":0,"carbohydrates":0,"calories":0}}]}`
+			// stubMsg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, formatShoppingList(stubJson))
+
 			// Получаем ID пользователя
 			userID := fmt.Sprintf("%d", update.CallbackQuery.From.ID)
-			
+
 			// Проверяем, известен ли пользователь
 			userName, isKnown := b.knownUsers[userID]
 			if !isKnown {
@@ -162,32 +176,37 @@ func (b *Bot) Start() error {
 			b.api.Send(welcomeMsg)
 
 			// Делаем запрос к сервису меню
-			resp, err := http.Get(fmt.Sprintf("%s/api/v1/menus/getMeal?user_id=%s", b.menuServiceURL, userID))
+			query := fmt.Sprintf("%s/api/v1/menus/getMeal?user_id=%s", b.menuServiceURL, userName)
+			log.Println(time.Now().String() + " -> " + query)
+			resp, err := http.Get(query)
 			if err != nil {
-				b.api.Send(stubMsg)
+				// b.api.Send(stubMsg)
 				b.sendErrorMessage(update.CallbackQuery.Message.Chat.ID, "Ошибка при получении данных")
 				continue
 			}
+			log.Println(time.Now().String() + " -> got responce")
 			defer resp.Body.Close()
 
 			// Проверяем статус ответа
 			if resp.StatusCode != http.StatusOK {
-				b.api.Send(stubMsg)
+				// b.api.Send(stubMsg)
 				body, _ := io.ReadAll(resp.Body)
-				b.sendErrorMessage(update.CallbackQuery.Message.Chat.ID, string(body))
+				b.sendErrorMessage(update.CallbackQuery.Message.Chat.ID, "Статус ответа не ОК\n"+string(body))
 				continue
 			}
 
 			// Парсим ответ
 			var mealResp MealResponse
 			if err := json.NewDecoder(resp.Body).Decode(&mealResp); err != nil {
-				b.api.Send(stubMsg)
+				// b.api.Send(stubMsg)
 				b.sendErrorMessage(update.CallbackQuery.Message.Chat.ID, "Ошибка при разборе данных")
 				continue
 			}
+			log.Println(mealResp.Meal)
+			log.Println(mealResp.ShoppingList)
 
 			// Формируем сообщение для пользователя
-			message := fmt.Sprintf("🍽 *Следующий прием пищи:*\n\n")
+			message := "🍽 *Следующий прием пищи:*\n\n"
 			for i, dish := range mealResp.Meal.DishName {
 				message += fmt.Sprintf("🍳 %s\n", dish)
 				if i < len(mealResp.Meal.Recipe) {
@@ -198,9 +217,9 @@ func (b *Bot) Start() error {
 			if mealResp.ShoppingList != "" {
 				message += fmt.Sprintf("\n%s", formatShoppingList(mealResp.ShoppingList))
 			}
-
-			msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, message)
-			msg.ParseMode = "Markdown"
+			log.Println(message)
+			msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, escapeUnderscores(message))
+			// msg.ParseMode = "MarkdownV2"
 
 			// Добавляем кнопку для следующего запроса
 			keyboard := tgbotapi.NewInlineKeyboardMarkup(
@@ -229,4 +248,9 @@ func (b *Bot) sendErrorMessage(chatID int64, text string) {
 	msg.ReplyMarkup = keyboard
 
 	b.api.Send(msg)
+}
+
+// escapeUnderscores — функция, заменяющая "_" на "\_"
+func escapeUnderscores(input string) string {
+	return strings.ReplaceAll(input, "_", "\\_")
 }
