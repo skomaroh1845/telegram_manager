@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,17 @@ type MealResponse struct {
 		} `json:"total_nutrition"`
 	} `json:"meal"`
 	ShoppingList string `json:"shopping_list"`
+}
+
+type Ingredient struct {
+	Unit      string  `json:"unit"`
+	Amount    float64 `json:"amount"`
+	ProductID string  `json:"product_id"`
+}
+
+type RecipeData struct {
+	Steps       []string     `json:"steps"`
+	Ingredients []Ingredient `json:"ingredients"`
 }
 
 // Bot структура для работы с ботом
@@ -75,10 +87,11 @@ func formatShoppingList(jsonStr string) string {
 		if itemName == "" {
 			itemName = item.ID
 		}
+		log.Println(item)
 
 		result.WriteString(fmt.Sprintf("• %s", itemName))
 		if item.Amount > 0 {
-			result.WriteString(fmt.Sprintf(" (%d шт)", item.Amount))
+			result.WriteString(fmt.Sprintf(" (%d г)", item.Amount))
 		}
 		if item.WeightPerPkg > 0 {
 			result.WriteString(fmt.Sprintf(" %.2f кг", item.WeightPerPkg))
@@ -111,35 +124,59 @@ func (b *Bot) Start() error {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
+	// Отбивка старта бота
+	for chatID, userName := range b.knownUsers {
+		id, err := strconv.ParseInt(chatID, 10, 64)
+		if err != nil {
+			fmt.Println("Ошибка преобразования chatID:", err)
+			continue
+		}
+		// приветственное сообщение
+		message := fmt.Sprintf("🍖 %s, Бот запущен.\nДа начнется массонабор!", userName)
+		msg := tgbotapi.NewMessage(id, message)
+
+		// добвляем кнопку старт
+		keyboard := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Старт!", "start"),
+			),
+		)
+		msg.ReplyMarkup = keyboard
+
+		b.api.Send(msg)
+	}
+
 	updates := b.api.GetUpdatesChan(u)
 
-	flag := true
-
 	for update := range updates {
-
-		// Отбивка старта бота
-		if flag {
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "🍖 Бот запущен. Да начнется массонабор!")
-			b.api.Send(msg)
-			flag = false
-		}
 
 		if update.Message == nil && update.CallbackQuery == nil {
 			continue
 		}
 
-		// Обработка команды /start
-		if update.Message != nil && update.Message.Command() == "start" {
-			userID := fmt.Sprintf("%d", update.Message.From.ID)
-			var welcomeText string
+		// Обработка команды /start и кнопки start
+		if (update.Message != nil && update.Message.Command() == "start") || (update.CallbackQuery != nil && update.CallbackQuery.Data == "start") {
+			var userID string
+			if update.Message != nil {
+				userID = fmt.Sprintf("%d", update.Message.From.ID)
+			} else {
+				userID = fmt.Sprintf("%d", update.CallbackQuery.From.ID)
+			}
 
+			// для известных пользователей
+			var welcomeText string
 			if userName, isKnown := b.knownUsers[userID]; isKnown {
 				welcomeText = fmt.Sprintf("👋 С возвращением, %s! Нажми кнопку, чтобы получить следующий прием пищи", userName)
 			} else {
 				welcomeText = "⚠️ Извините, но я вас не знаю. Обратитесь к администратору для получения доступа."
 			}
 
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, welcomeText)
+			var msg tgbotapi.MessageConfig
+			if update.Message != nil {
+				msg = tgbotapi.NewMessage(update.Message.Chat.ID, welcomeText)
+			} else {
+				msg = tgbotapi.NewMessage(update.CallbackQuery.From.ID, welcomeText)
+			}
 
 			// Добавляем кнопку только для известных пользователей
 			if _, isKnown := b.knownUsers[userID]; isKnown {
@@ -210,7 +247,23 @@ func (b *Bot) Start() error {
 			for i, dish := range mealResp.Meal.DishName {
 				message += fmt.Sprintf("🍳 %s\n", dish)
 				if i < len(mealResp.Meal.Recipe) {
-					message += fmt.Sprintf("📝 Рецепт: %s\n\n", mealResp.Meal.Recipe[i])
+					var rd RecipeData
+					err := json.Unmarshal([]byte(mealResp.Meal.Recipe[i]), &rd)
+					if err != nil {
+						// Если вдруг не удалось распарсить, покажем сырой вариант, но лучше этого не допускать
+						message += fmt.Sprintf("📝 Рецепт: %s\n\n", mealResp.Meal.Recipe[i])
+					} else {
+						// Форматируем красиво
+						message += "📝 Рецепт:\n"
+						for _, step := range rd.Steps {
+							message += fmt.Sprintf("- %s\n", step)
+						}
+						message += "\nИнгредиенты:\n"
+						for _, ing := range rd.Ingredients {
+							message += fmt.Sprintf("- %s: %.0f %s\n", ing.ProductID, ing.Amount, ing.Unit)
+						}
+						message += "\n"
+					}
 				}
 			}
 
@@ -218,8 +271,8 @@ func (b *Bot) Start() error {
 				message += fmt.Sprintf("\n%s", formatShoppingList(mealResp.ShoppingList))
 			}
 			log.Println(message)
-			msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, escapeUnderscores(message))
-			// msg.ParseMode = "MarkdownV2"
+			msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, message) // escapeUnderscores(message))
+			msg.ParseMode = "Markdown"
 
 			// Добавляем кнопку для следующего запроса
 			keyboard := tgbotapi.NewInlineKeyboardMarkup(
@@ -231,6 +284,18 @@ func (b *Bot) Start() error {
 
 			b.api.Send(msg)
 		}
+	}
+
+	// Отбивка остановки бота
+	for chatID, userName := range b.knownUsers {
+		id, err := strconv.ParseInt(chatID, 10, 64)
+		if err != nil {
+			fmt.Println("Ошибка преобразования chatID:", err)
+			continue
+		}
+		message := fmt.Sprintf("🍖 %s, Бот остановлен.\nДа начнется сушка!", userName)
+		msg := tgbotapi.NewMessage(id, message)
+		b.api.Send(msg)
 	}
 
 	return nil
