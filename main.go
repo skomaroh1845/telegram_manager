@@ -1,10 +1,11 @@
 package main
 
 import (
-    "log"
-	"telegram_bot/internal/bot"
-	"gopkg.in/yaml.v3"
+	"log"
 	"os"
+	"telegram_bot/internal/bot"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -45,4 +46,4 @@ func main() {
 	if err := bot.Start(); err != nil {
 		log.Fatal(err)
 	}
-} 
+}
